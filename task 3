@@ -1,0 +1,31 @@
+ORANGE=$'\033[38;5;208m'
+CYAN=$'\033[0;36m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+MAGENTA=$'\033[0;35m'
+BLUE=$'\033[0;34m'
+BOLD=$'\033[1m'
+RESET=$'\033[0m'
+
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
+echo "${MAGENTA}${BOLD} STAGE 3: Simulate Failover (Task 3)                      ${RESET}"
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
+
+echo "${YELLOW}▶ Waiting for MIG A instances to finish booting...${RESET}"
+while [ -z "$(gcloud compute instances list --filter='name:mig-alb-api-a*' --format='value(name)')" ]; do echo "${CYAN}Waiting for instance in Region A...${RESET}"; sleep 5; done
+
+INSTANCE=$(gcloud compute instances list --filter="name:mig-alb-api-a*" --format="value(name)" | head -n 1)
+ZONE=$(gcloud compute instances list --filter="name:mig-alb-api-a*" --format="value(zone)" | awk -F/ '{print $NF}' | head -n 1)
+
+echo "${BLUE}Target Instance: ${INSTANCE} (Zone: ${ZONE})${RESET}"
+
+echo "${YELLOW}▶ Configuring SSH keys...${RESET}"
+mkdir -p ~/.ssh
+ssh-keygen -t rsa -f ~/.ssh/google_compute_engine -N "" -q <<< y >/dev/null 2>&1 || true
+
+echo "${YELLOW}▶ Stopping Nginx on Region A backend ($INSTANCE)...${RESET}"
+gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet --command="sudo systemctl stop nginx"
+
+echo "${GREEN}${BOLD}✓ Nginx successfully stopped. Traffic is failing over to Region B.${RESET}"
+echo "${ORANGE}${BOLD}Wait ~60 seconds for Google's health checks to register the failure, then click 'Check my progress' for Task 3.${RESET}"
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
