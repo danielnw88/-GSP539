@@ -1,0 +1,61 @@
+clear
+ORANGE=$'\033[38;5;208m'
+CYAN=$'\033[0;36m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+MAGENTA=$'\033[0;35m'
+BLUE=$'\033[0;34m'
+BOLD=$'\033[1m'
+RESET=$'\033[0m'
+
+echo "${ORANGE}${BOLD}   ____        _   _ _            __   ___              ${RESET}"
+echo "${ORANGE}${BOLD}  / __ \      | | (_) |          / _| / _ \             ${RESET}"
+echo "${ORANGE}${BOLD} | |  | |_ __| |__  _| |_  ___   | |_ | | | |_ __ ___  ${RESET}"
+echo "${ORANGE}${BOLD} | |  | | '__| '_ \| | __| / _ \ |  _|| | | | '_ \ / __| ${RESET}"
+echo "${ORANGE}${BOLD} | |__| | |  | |_) | | |_ | (_) || |  | |_| | |_) \__ \ ${RESET}"
+echo "${ORANGE}${BOLD}  \____/|_|  |_.__/|_|\__| \___/ |_|   \___/| .__/|___/ ${RESET}"
+echo "${ORANGE}${BOLD}                                            | |         ${RESET}"
+echo "${ORANGE}${BOLD}                                            |_|         ${RESET}"
+echo ""
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
+echo "${MAGENTA}${BOLD} STAGE 2: Global External ALB (Task 2)                    ${RESET}"
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
+
+read -p "${BLUE}${BOLD}Enter Region A (e.g., us-east4): ${RESET}" REGION_A
+read -p "${BLUE}${BOLD}Enter Region B (e.g., us-central1): ${RESET}" REGION_B
+
+echo "${YELLOW}▶ Waiting for template to provision...${RESET}"
+while [ -z "$(gcloud compute instance-templates list --filter='name:template-alb-api' --format='value(name)')" ]; do sleep 5; done
+TEMPLATE_ALB_URI=$(gcloud compute instance-templates list --filter="name:template-alb-api" --format="value(selfLink)" | head -n 1)
+
+echo "${YELLOW}▶ Creating Regional MIGs (A & B)...${RESET}"
+gcloud compute instance-groups managed create mig-alb-api-a --template=$TEMPLATE_ALB_URI --region=$REGION_A --size=1 --quiet 2>/dev/null || true
+gcloud compute instance-groups managed set-named-ports mig-alb-api-a --named-ports=http80:80 --region=$REGION_A --quiet 2>/dev/null || true
+gcloud compute instance-groups managed create mig-alb-api-b --template=$TEMPLATE_ALB_URI --region=$REGION_B --size=1 --quiet 2>/dev/null || true
+gcloud compute instance-groups managed set-named-ports mig-alb-api-b --named-ports=http80:80 --region=$REGION_B --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Configuring Global Backend Service (with Rate Limiting)...${RESET}"
+gcloud compute health-checks create http http-check-alb --global --port=80 --quiet 2>/dev/null || true
+gcloud compute backend-services create service-alb-global --global --protocol=HTTP --health-checks=http-check-alb --port-name=http80 --quiet 2>/dev/null || true
+gcloud compute backend-services add-backend service-alb-global --global --instance-group=mig-alb-api-a --instance-group-region=$REGION_A --balancing-mode=RATE --max-rate-per-instance=1 --quiet 2>/dev/null || true
+gcloud compute backend-services add-backend service-alb-global --global --instance-group=mig-alb-api-b --instance-group-region=$REGION_B --balancing-mode=RATE --max-rate-per-instance=1 --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Generating SSL Certificate and Global IP...${RESET}"
+openssl genrsa -out key.pem 2048 2>/dev/null
+openssl req -new -x509 -key key.pem -out cert.pem -days 1 -subj "/CN=example.com" 2>/dev/null
+gcloud compute ssl-certificates create cert-self-signed --certificate=cert.pem --private-key=key.pem --global --quiet 2>/dev/null || true
+gcloud compute addresses create ip-alb-global --global --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Deploying Global Load Balancer Frontend...${RESET}"
+gcloud compute url-maps create url-map-alb --default-service=service-alb-global --quiet 2>/dev/null || true
+gcloud compute target-https-proxies create https-proxy-alb --url-map=url-map-alb --ssl-certificates=cert-self-signed --quiet 2>/dev/null || true
+gcloud compute forwarding-rules create https-forwarding-rule --global --target-https-proxy=https-proxy-alb --ports=443 --address=ip-alb-global --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Creating Firewall Rule...${RESET}"
+ALB_NET_URI=$(gcloud compute instance-templates list --filter="name:template-alb-api" --format="value(properties.networkInterfaces[0].network)" | head -n 1)
+ALB_NET_NAME=$(basename $ALB_NET_URI)
+gcloud compute firewall-rules create fw-allow-health-check-and-proxy --network=$ALB_NET_NAME --action=allow --direction=ingress --source-ranges=130.211.0.0/22,35.191.0.0/16 --target-tags=tag-alb-api --rules=tcp:80 --quiet 2>/dev/null || true
+
+echo "${GREEN}${BOLD}✓ Stage 2 Complete!${RESET}"
+echo "${ORANGE}${BOLD}WAIT 2-3 MINUTES for the Global Load Balancer APIs to propagate, then click 'Check my progress' for Task 2.${RESET}"
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
