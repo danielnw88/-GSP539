@@ -1,0 +1,63 @@
+clear
+ORANGE=$'\033[38;5;208m'
+CYAN=$'\033[0;36m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+MAGENTA=$'\033[0;35m'
+BLUE=$'\033[0;34m'
+BOLD=$'\033[1m'
+RESET=$'\033[0m'
+
+echo "${ORANGE}${BOLD}   ____        _   _ _            __   ___              ${RESET}"
+echo "${ORANGE}${BOLD}  / __ \      | | (_) |          / _| / _ \             ${RESET}"
+echo "${ORANGE}${BOLD} | |  | |_ __| |__  _| |_  ___   | |_ | | | |_ __ ___  ${RESET}"
+echo "${ORANGE}${BOLD} | |  | | '__| '_ \| | __| / _ \ |  _|| | | | '_ \ / __| ${RESET}"
+echo "${ORANGE}${BOLD} | |__| | |  | |_) | | |_ | (_) || |  | |_| | |_) \__ \ ${RESET}"
+echo "${ORANGE}${BOLD}  \____/|_|  |_.__/|_|\__| \___/ |_|   \___/| .__/|___/ ${RESET}"
+echo "${ORANGE}${BOLD}                                            | |         ${RESET}"
+echo "${ORANGE}${BOLD}                                            |_|         ${RESET}"
+echo ""
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
+echo "${MAGENTA}${BOLD} STAGE 1: Internal Regional Proxy NLB (Master Build)      ${RESET}"
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
+
+read -p "${BLUE}${BOLD}Enter Region B (e.g., us-east1): ${RESET}" REGION_B
+export REGION_B=$REGION_B
+
+echo "${YELLOW}▶ Waiting for template to provision in the background...${RESET}"
+while [ -z "$(gcloud compute instance-templates list --filter='name:template-proxy-internal' --format='value(name)')" ]; do sleep 5; done
+TEMPLATE_PROXY_URI=$(gcloud compute instance-templates list --filter="name:template-proxy-internal" --format="value(selfLink)" | head -n 1)
+
+echo "${YELLOW}▶ Discovering Exact Subnet...${RESET}"
+SUBNET_B=$(gcloud compute networks subnets list --network=lb-network --regions=$REGION_B --format="value(name)" | grep -v "proxy" | head -n 1)
+echo "${CYAN}Discovered Subnet B: ${SUBNET_B}${RESET}"
+
+echo "${YELLOW}▶ Creating MIG & Setting Named Port (tcp80)...${RESET}"
+gcloud compute instance-groups managed create mig-proxy-internal --template=$TEMPLATE_PROXY_URI --region=$REGION_B --size=1 --quiet 2>/dev/null || true
+gcloud compute instance-groups managed set-named-ports mig-proxy-internal --named-ports=tcp80:80 --region=$REGION_B --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Creating Firewalls...${RESET}"
+gcloud compute firewall-rules create fw-allow-hc-proxy-internal --network=lb-network --action=allow --direction=ingress --source-ranges=130.211.0.0/22,35.191.0.0/16 --target-tags=tag-proxy-internal --rules=tcp:80 --quiet 2>/dev/null || true
+gcloud compute firewall-rules create fw-allow-proxy-subnet-internal --network=lb-network --action=allow --direction=ingress --source-ranges=10.129.0.0/23 --target-tags=tag-proxy-internal --rules=tcp:80 --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Reserving Shared VIP Internal IP Address...${RESET}"
+gcloud compute addresses create ip-internal-proxy --region=$REGION_B --subnet=$SUBNET_B --purpose=SHARED_LOADBALANCER_VIP --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Creating Health Check...${RESET}"
+gcloud compute health-checks create tcp hc-internal-proxy --region=$REGION_B --port=80 --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Deploying Backend Service (with tcp80 Port Name)...${RESET}"
+gcloud compute backend-services create internal-proxy-backend --load-balancing-scheme=INTERNAL_MANAGED --protocol=TCP --region=$REGION_B --health-checks=hc-internal-proxy --health-checks-region=$REGION_B --port-name=tcp80 --quiet 2>/dev/null || true
+gcloud compute backend-services add-backend internal-proxy-backend --region=$REGION_B --instance-group=mig-proxy-internal --instance-group-region=$REGION_B --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Deploying Target TCP Proxy & Forwarding Rule...${RESET}"
+gcloud compute target-tcp-proxies create proxy-internal --region=$REGION_B --backend-service=internal-proxy-backend --quiet 2>/dev/null || true
+gcloud compute forwarding-rules create rule-internal-proxy --region=$REGION_B --load-balancing-scheme=INTERNAL_MANAGED --network=lb-network --subnet=$SUBNET_B --address=ip-internal-proxy --ports=110 --target-tcp-proxy=proxy-internal --target-tcp-proxy-region=$REGION_B --quiet 2>/dev/null || true
+
+echo "${YELLOW}▶ Deploying Client Validation VM...${RESET}"
+ZONE_B=$(gcloud compute zones list --filter="region:($REGION_B)" --format="value(name)" | head -n 1)
+gcloud compute instances create vm-client-internal --zone=$ZONE_B --machine-type=e2-micro --network=lb-network --subnet=$SUBNET_B --tags=allow-ssh --quiet 2>/dev/null || true
+
+echo "${GREEN}${BOLD}✓ Master Build Complete!${RESET}"
+echo "${ORANGE}${BOLD}Wait ~45 seconds for Google Cloud to register the backend health, then click 'Check my progress' for Task 1.${RESET}"
+echo "${MAGENTA}${BOLD}==========================================================${RESET}"
